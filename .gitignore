@@ -1,0 +1,7 @@
+/lightmail-data/
+*.pem
+*.key
+*.crt
+*.log
+*.sqlite
+/.env
