@@ -302,18 +302,13 @@ if [[ "$ENABLE_IMAP" == "1" ]]; then
 protocols = imap
 listen = *
 ssl = required
-ssl_cert = </etc/ssl/mail/fullchain.pem
-ssl_key = </etc/ssl/mail/privkey.pem
-mail_location = maildir:/var/mail/${DOMAIN}/%n/Maildir
+ssl_server_cert_file = /etc/ssl/mail/fullchain.pem
+ssl_server_key_file = /etc/ssl/mail/privkey.pem
+mail_driver = maildir
+mail_path = /var/mail/${DOMAIN}/%{user | username}/Maildir
+mail_inbox_path = /var/mail/${DOMAIN}/%{user | username}/Maildir
 auth_mechanisms = plain login
-disable_plaintext_auth = yes
-auth_username_format = %n
-passdb {
-  driver = pam
-}
-userdb {
-  driver = passwd
-}
+auth_username_format = %{user | username}
 EOF_DOV
 
   dovecot -F >/var/log/dovecot.log 2>&1 &
@@ -407,15 +402,15 @@ if [[ "$ENABLE_ROUNDCUBE" == "1" ]]; then
 EOF
 
     if [[ "$ROUNDCUBE_ALLOW_SELF_SIGNED" == "1" ]]; then
-      cat >> "$rc_config" <<'EOF'
-\$config['imap_conn_options'] = [
+    cat >> "$rc_config" <<'EOF'
+$config['imap_conn_options'] = [
   'ssl' => [
     'verify_peer' => false,
     'verify_peer_name' => false,
     'allow_self_signed' => true,
   ],
 ];
-\$config['smtp_conn_options'] = [
+$config['smtp_conn_options'] = [
   'ssl' => [
     'verify_peer' => false,
     'verify_peer_name' => false,
