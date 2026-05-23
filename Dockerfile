@@ -35,6 +35,6 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-EXPOSE 25 80 465 587 8081 8443 993
+EXPOSE 25 80 465 587 8080 8081 8443 993
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

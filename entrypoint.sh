@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# --- Initial Debug ---
+printf '%s\n' "--- ENTRYPOINT START ---"
+printf 'Initial HOSTNAME: %s\n' "${HOSTNAME:-UNSET}"
+printf 'Initial HTTPS_HOST: %s\n' "${HTTPS_HOST:-UNSET}"
+printf '%s\n' "------------------------"
+
 DOMAIN=${DOMAIN:-}
 HOSTNAME=${HOSTNAME:-}
 ADMIN_EMAIL=${ADMIN_EMAIL:-}
@@ -9,6 +15,7 @@ CERT_PATH=${CERT_PATH:-}
 KEY_PATH=${KEY_PATH:-}
 ENABLE_IMAP=${ENABLE_IMAP:-0}
 ENABLE_ACME=${ENABLE_ACME:-0}
+ACME_PORT=${ACME_PORT:-8080}
 ENABLE_ACME_RENEW=${ENABLE_ACME_RENEW:-0}
 ENABLE_ROUNDCUBE=${ENABLE_ROUNDCUBE:-0}
 ROUNDCUBE_PORT=${ROUNDCUBE_PORT:-8081}
@@ -16,7 +23,7 @@ ROUNDCUBE_VERSION=${ROUNDCUBE_VERSION:-1.6.13}
 ROUNDCUBE_ALLOW_SELF_SIGNED=${ROUNDCUBE_ALLOW_SELF_SIGNED:-1}
 ENABLE_HTTPS_PROXY=${ENABLE_HTTPS_PROXY:-0}
 HTTPS_PORT=${HTTPS_PORT:-8443}
-HTTPS_HOST=${HTTPS_HOST:-}
+HTTPS_HOST=${HTTPS_HOST:-$HOSTNAME}
 ROUNDCUBE_PATH=${ROUNDCUBE_PATH:-/roundcube}
 RELAYHOST=${RELAYHOST:-}
 RELAY_PORT=${RELAY_PORT:-587}
@@ -32,7 +39,8 @@ if [[ -z "$DOMAIN" ]]; then
 fi
 
 if [[ -z "$HOSTNAME" ]]; then
-  HOSTNAME="mail.${DOMAIN}"
+  echo "HOSTNAME is required" >&2
+  exit 1
 fi
 
 if [[ -z "$ADMIN_EMAIL" ]]; then
@@ -63,7 +71,7 @@ export DOMAIN HOSTNAME ADMIN_EMAIL
 
 # Basic hostname setup
 printf "%s\n" "$HOSTNAME" > /etc/hostname || true
-hostname "$HOSTNAME" || true
+hostname "$HOSTNAME" >/dev/null 2>&1 || true
 
 # Ensure groups
 if ! getent group sasl >/dev/null; then
@@ -76,50 +84,37 @@ mkdir -p "$MAIL_ROOT"
 
 # Create users and Maildir
 USERS_FILE="/etc/lightmail/users"
-if [[ ! -f "$USERS_FILE" ]]; then
-  : > "$USERS_FILE"
+# Always recreate the users from the environment variable to avoid stateful errors.
+: > "$USERS_FILE"
 
-  IFS=',' read -ra USER_PAIRS <<< "$USERS"
-  for pair in "${USER_PAIRS[@]}"; do
-    user="${pair%%:*}"
-    pass="${pair#*:}"
+IFS=',' read -ra USER_PAIRS <<< "$USERS"
+for pair in "${USER_PAIRS[@]}"; do
+  user="${pair%%:*}"
+  pass="${pair#*:}"
 
-    if [[ -z "$user" || -z "$pass" || "$user" == "$pass" ]]; then
-      echo "Invalid user entry: $pair" >&2
-      exit 1
-    fi
+  if [[ -z "$user" || -z "$pass" || "$user" == "$pass" ]]; then
+    echo "Invalid user entry: $pair" >&2
+    exit 1
+  fi
 
-    if ! id "$user" >/dev/null 2>&1; then
-      useradd -m -d "$MAIL_ROOT/$user" -s /usr/sbin/nologin "$user"
-    fi
+  if ! id "$user" >/dev/null 2>&1; then
+    useradd -m -d "$MAIL_ROOT/$user" -s /usr/sbin/nologin "$user"
+  fi
 
-    echo "$user:$pass" | chpasswd
+  echo "$user:$pass" | chpasswd
 
-    maildir="$MAIL_ROOT/$user/Maildir"
-    mkdir -p "$maildir/cur" "$maildir/new" "$maildir/tmp"
-    chown -R "$user:$user" "$MAIL_ROOT/$user"
+  maildir="$MAIL_ROOT/$user/Maildir"
+  mkdir -p "$maildir/cur" "$maildir/new" "$maildir/tmp"
+  chown -R "$user:$user" "$MAIL_ROOT/$user"
 
-  # Store hashed password for persistent user reuse
-  hash=$(openssl passwd -6 "$pass")
+# Store hashed password for persistent user reuse
+hash=$(openssl passwd -6 "$pass")
 
-    printf "%s:%s\n" "$user" "$hash" >> "$USERS_FILE"
+  printf "%s:%s\n" "$user" "$hash" >> "$USERS_FILE"
 
-  done
+done
 
-  chmod 600 "$USERS_FILE"
-else
-  echo "Using existing users file at $USERS_FILE"
-  while IFS=: read -r user hash; do
-    [[ -z "$user" || -z "$hash" ]] && continue
-    if ! id "$user" >/dev/null 2>&1; then
-      useradd -m -d "$MAIL_ROOT/$user" -s /usr/sbin/nologin "$user"
-    fi
-    echo "$user:$hash" | chpasswd -e
-    maildir="$MAIL_ROOT/$user/Maildir"
-    mkdir -p "$maildir/cur" "$maildir/new" "$maildir/tmp"
-    chown -R "$user:$user" "$MAIL_ROOT/$user"
-  done < "$USERS_FILE"
-fi
+chmod 600 "$USERS_FILE"
 
 # Ensure catchall user exists
 if ! id "$CATCHALL_USER" >/dev/null 2>&1; then
@@ -219,8 +214,8 @@ EOF_TRUST
 
   postconf -e "milter_default_action=accept"
   postconf -e "milter_protocol=6"
-  postconf -e "smtpd_milters=unix:/opendkim/opendkim.sock"
-  postconf -e "non_smtpd_milters=unix:/opendkim/opendkim.sock"
+  postconf -e "smtpd_milters=unix:opendkim/opendkim.sock"
+  postconf -e "non_smtpd_milters=unix:opendkim/opendkim.sock"
 
   opendkim -x /etc/opendkim/opendkim.conf
   for _ in 1 2 3 4 5; do
@@ -285,36 +280,15 @@ fi
 # Start syslog
 rsyslogd
 
-# Install provided certs, or obtain via ACME (only if missing), or create self-signed
-if [[ -n "$CERT_PATH" && -n "$KEY_PATH" && -f "$CERT_PATH" && -f "$KEY_PATH" ]]; then
-  cp "$CERT_PATH" /etc/ssl/mail/fullchain.pem
-  cp "$KEY_PATH" /etc/ssl/mail/privkey.pem
-  chmod 600 /etc/ssl/mail/privkey.pem
-elif [[ -s /etc/ssl/mail/fullchain.pem && -s /etc/ssl/mail/privkey.pem ]]; then
-  echo "Existing TLS certs found in /etc/ssl/mail; skipping ACME issuance." >&2
-elif [[ "$ENABLE_ACME" == "1" ]]; then
-  if [[ ! -x /root/.acme.sh/acme.sh ]]; then
-    curl -fsSL https://get.acme.sh | sh -s email="$ADMIN_EMAIL" --force
-  fi
-  if /root/.acme.sh/acme.sh --issue --standalone -d "$HOSTNAME" --keylength ec-256; then
-    /root/.acme.sh/acme.sh --install-cert -d "$HOSTNAME" \
-      --key-file /etc/ssl/mail/privkey.pem \
-      --fullchain-file /etc/ssl/mail/fullchain.pem
-  else
-    echo "ACME issuance failed; generating self-signed cert" >&2
-    openssl req -x509 -newkey rsa:2048 -sha256 -days 365 -nodes \
-      -subj "/CN=${HOSTNAME}" \
-      -keyout /etc/ssl/mail/privkey.pem \
-      -out /etc/ssl/mail/fullchain.pem
-  fi
-  chmod 600 /etc/ssl/mail/privkey.pem
-else
-  openssl req -x509 -newkey rsa:2048 -sha256 -days 365 -nodes \
-    -subj "/CN=${HOSTNAME}" \
-    -keyout /etc/ssl/mail/privkey.pem \
-    -out /etc/ssl/mail/fullchain.pem
-  chmod 600 /etc/ssl/mail/privkey.pem
+# Verify certs are provided
+if [[ ! -f /etc/ssl/mail/fullchain.pem || ! -f /etc/ssl/mail/privkey.pem ]]; then
+  echo "FATAL: Certificate and key not found in /etc/ssl/mail." >&2
+  echo "Please ensure certificates are generated and available in the volume before starting." >&2
+  exit 1
 fi
+
+# Ensure correct permissions
+chmod 600 /etc/ssl/mail/privkey.pem || true
 
 # Start saslauthd
 saslauthd -a pam -m /var/run/saslauthd
@@ -363,7 +337,7 @@ if [[ "$ENABLE_ROUNDCUBE" == "1" ]]; then
   if [[ ! -f "${rc_root}/index.php" ]]; then
     rc_urls=()
     if [[ "$ROUNDCUBE_VERSION" == "latest" ]]; then
-      rc_latest_url="$(curl -fsSL https://roundcube.net/download/ | grep -o 'https://github.com/roundcube/roundcubemail/releases/download/[0-9.]\+/roundcubemail-[0-9.]\+-complete\\.tar\\.gz' | head -n 1 || true)"
+      rc_latest_url="$(curl -fsSL https://roundcube.net/download/ | grep -o 'https://github.com/roundcube/roundcubemail/releases/download/[0-9.]\+/roundcubemail-[0-9.]\+-complete\.tar\.gz' | head -n 1 || true)"
       if [[ -n "$rc_latest_url" ]]; then
         rc_urls+=("$rc_latest_url")
       fi
@@ -434,14 +408,14 @@ EOF
 
     if [[ "$ROUNDCUBE_ALLOW_SELF_SIGNED" == "1" ]]; then
       cat >> "$rc_config" <<'EOF'
-$config['imap_conn_options'] = [
+\$config['imap_conn_options'] = [
   'ssl' => [
     'verify_peer' => false,
     'verify_peer_name' => false,
     'allow_self_signed' => true,
   ],
 ];
-$config['smtp_conn_options'] = [
+\$config['smtp_conn_options'] = [
   'ssl' => [
     'verify_peer' => false,
     'verify_peer_name' => false,
@@ -480,25 +454,19 @@ fi
 if [[ "$ENABLE_HTTPS_PROXY" == "1" ]]; then
   mkdir -p /etc/caddy
   caddyfile="/etc/caddy/Caddyfile"
-  {
-    echo "https://${HTTPS_HOST}:${HTTPS_PORT} {"
-    echo "  tls /etc/ssl/mail/fullchain.pem /etc/ssl/mail/privkey.pem"
-    if [[ "$ENABLE_ROUNDCUBE" == "1" ]]; then
-      if [[ "$ROUNDCUBE_PATH" != "/" ]]; then
-        echo "  handle_path ${ROUNDCUBE_PATH}* {"
-        echo "    reverse_proxy 127.0.0.1:${ROUNDCUBE_PORT}"
-        echo "  }"
-      fi
-      echo "  handle {"
-      echo "    reverse_proxy 127.0.0.1:${ROUNDCUBE_PORT}"
-      echo "  }"
-    else
-      echo "  handle {"
-      echo "    respond \"Not configured\" 404"
-      echo "  }"
-    fi
-    echo "}"
-  } > "$caddyfile"
+  
+  # Create a simple Caddyfile that always proxies to Roundcube.
+  # This avoids the "Not found" error by not having a separate handler for the root path.
+  cat > "$caddyfile" <<EOF
+{
+  auto_https off
+}
+https://${HTTPS_HOST}:${HTTPS_PORT} {
+  tls /etc/ssl/mail/fullchain.pem /etc/ssl/mail/privkey.pem
+  
+  reverse_proxy 127.0.0.1:${ROUNDCUBE_PORT}
+}
+EOF
 
   caddy run --config "$caddyfile" --adapter caddyfile >/var/log/caddy.log 2>&1 &
   CADDY_PID=$!
@@ -514,11 +482,7 @@ if [[ "$ENABLE_ACME_RENEW" == "1" ]]; then
   ) &
 fi
 
-# Keep container alive on primary process
-if [[ -n "${ROUNDCUBE_PID:-}" ]]; then
-  wait "$ROUNDCUBE_PID"
-elif [[ -n "${CADDY_PID:-}" ]]; then
-  wait "$CADDY_PID"
-else
-  tail -f /dev/null
-fi
+# Keep container alive and stream logs for debugging
+echo "--- Services started, streaming logs ---"
+touch /var/log/roundcube.log /var/log/caddy.log
+tail -f /var/log/roundcube.log /var/log/caddy.log

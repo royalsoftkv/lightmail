@@ -60,7 +60,7 @@ Place your certs here:
 - `/root/lightmail-data/certs/fullchain.pem`
 - `/root/lightmail-data/certs/privkey.pem`
 
-If you want ACME to issue certs inside the container, set `ENABLE_ACME=1` and map port 80 temporarily. You can also use `/root/lightmail/get-cert.sh` and `/root/lightmail/renew-cert.sh` to obtain/renew certs outside the main container.
+If you want ACME to issue certs inside the container, set `ENABLE_ACME=1` and map port 80 temporarily. You can also use `renew-cert.sh` to renew certs outside the main container (same Certbot approach as install.sh).
 
 ### 4) Run container (example)
 ```

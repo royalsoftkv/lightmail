@@ -8,13 +8,69 @@ This is a single‑container, minimal mail server for a small number of users. I
 - Optional HTTPS reverse proxy (Caddy on 8443)
 - Optional automatic TLS cert issuance/renewal via ACME (Let’s Encrypt)
 
-## Build
+## Install (Recommended)
+
+### Prerequisites
+- Linux server with Docker installed
+- Root or sudo access
+- Port 80 free during initial setup (for Let's Encrypt)
+- DNS for `mail.<domain>` pointing to your server IP (can be added after install)
+
+### Steps
+
+1. **Build the image**
+```
+docker build -t lightmail:latest .
+```
+
+2. **Run the install script**
+```
+sudo ./install.sh
+```
+
+The script will:
+- Prompt for your domain, admin email, and user accounts
+- Obtain a Let's Encrypt certificate via Certbot (port 80 must be free)
+- Start the mail container with IMAP, Roundcube, and HTTPS proxy enabled
+- Save config to `./lightmail-data/install.conf` for future runs
+- Print the DNS records you need to add
+
+Data is stored in `./lightmail-data/`:
+- `mail/` — Maildir storage
+- `config/` — users, DKIM keys, Roundcube config
+- `certs/` — TLS certificates
+
+3. **Add DNS records**
+Follow the output from `install.sh`, or see [External Setup](#external-setup-required) below.
+
+4. **Verify DNS**
+```
+./check-dns.sh example.com YOUR_SERVER_IP docker
+```
+
+5. **Set up certificate renewal (cron)**
+```
+0 3 1 * * /path/to/lightmail/renew-cert.sh mail.example.com /path/to/lightmail-data/certs lightmail >> /var/log/lightmail-renew.log 2>&1
+```
+Port 80 must be free when the cron job runs. Certbot renews only when the cert is close to expiry.
+
+### Access after install
+- **Webmail:** `https://mail.<domain>:8443`
+- **IMAP:** `mail.<domain>:993` (SSL/TLS)
+- **SMTP:** `mail.<domain>:587` (STARTTLS)
+- **Username:** full email address (e.g. `user1@example.com`)
+
+## Manual Install
+
+If you prefer to run the container yourself instead of using `install.sh`:
+
+### Build
 
 ```
 docker build -t lightmail:latest .
 ```
 
-## Run
+### Run
 
 Example run command (replace passwords):
 
@@ -22,20 +78,19 @@ Example run command (replace passwords):
 docker run -d \
   --name lightmail \
   -p 25:25 -p 465:465 -p 587:587 -p 8443:8443 -p 993:993 \
-  -v /path/to/fullchain.pem:/certs/fullchain.pem:ro \
-  -v /path/to/privkey.pem:/certs/privkey.pem:ro \
+  -v /path/to/certs:/etc/ssl/mail \
   -v /path/on/host/mail:/var/mail \
   -v /path/on/host/lightmail:/etc/lightmail \
   -e DOMAIN=example.com \
   -e HOSTNAME=mail.example.com \
-  -e CERT_PATH=/certs/fullchain.pem \
-  -e KEY_PATH=/certs/privkey.pem \
   -e USERS="user1:pass1,user2:pass2" \
   -e ENABLE_IMAP=1 \
   -e ENABLE_ROUNDCUBE=1 \
   -e ENABLE_HTTPS_PROXY=1 \
   lightmail:latest
 ```
+
+Place `fullchain.pem` and `privkey.pem` in the certs directory before starting. Use `renew-cert.sh` to obtain or renew Let's Encrypt certificates.
 
 Roundcube (if enabled without HTTPS proxy) is available at `http://mail.<domain>:8081/`.
 If HTTPS proxy is enabled, use `https://mail.<domain>:8443/roundcube`.
@@ -53,6 +108,15 @@ If HTTPS proxy is enabled, use `https://mail.<domain>:8443/roundcube`.
 2. Reverse DNS (PTR)
 - Set PTR for server IP to `mail.<domain>` (must match your HELO)
 
+### Verify DNS
+Run `check-dns.sh` to verify all records are set correctly:
+```
+./check-dns.sh example.com
+./check-dns.sh example.com 203.0.113.10                    # with expected IP
+./check-dns.sh example.com 203.0.113.10 docker              # validate DKIM from container
+./check-dns.sh example.com 203.0.113.10 ./lightmail-data/config/dkim/example.com/mail.txt
+```
+
 3. Firewall
 - Inbound TCP: `25, 587, 465` (add `993` if IMAP is enabled)
 - If Roundcube is enabled without HTTPS proxy, open/map TCP `8081`
@@ -62,7 +126,7 @@ If HTTPS proxy is enabled, use `https://mail.<domain>:8443/roundcube`.
 
 ## Notes / Limitations
 - IMAP is optional (disabled by default); spam filtering and antivirus are intentionally not included for minimal resource usage.
-- TLS certs are provided by you via `CERT_PATH` and `KEY_PATH`, or via ACME. If neither is provided/enabled, a self-signed cert is generated for SMTP/IMAP/HTTPS.
+- TLS certs are required. Provide them via volume mounts to `/etc/ssl/mail` (e.g. `fullchain.pem` and `privkey.pem`). Use `install.sh` to obtain Let's Encrypt certificates initially; use `renew-cert.sh` to renew them. Or provide your own certs.
 When outbound TCP 25 is blocked by your host, use an SMTP relay.
 
 ## DKIM (Enabled by Default)
@@ -86,7 +150,7 @@ docker exec lightmail cat /etc/lightmail/dkim/<domain>/mail.txt
 Use the helper script to renew certificates when needed. It briefly maps port 80 and restarts the container.
 
 ```
-/root/lightmail/renew-cert.sh mail.terenac.com admin@terenac.com /root/lightmail-data/certs
+./renew-cert.sh mail.example.com ./lightmail-data/certs lightmail
 ```
 
 ## SMTP Relay (Optional)
