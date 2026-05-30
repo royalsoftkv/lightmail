@@ -32,6 +32,7 @@ RELAY_PASS=${RELAY_PASS:-}
 CATCHALL_USER=${CATCHALL_USER:-catchall}
 ENABLE_DKIM=${ENABLE_DKIM:-1}
 DKIM_SELECTOR=${DKIM_SELECTOR:-mail}
+USERS_FILE="/etc/lightmail/users"
 
 if [[ -z "$DOMAIN" ]]; then
   echo "DOMAIN is required" >&2
@@ -51,8 +52,8 @@ if [[ -z "$HTTPS_HOST" ]]; then
   HTTPS_HOST="$HOSTNAME"
 fi
 
-if [[ -z "$USERS" ]]; then
-  echo "USERS is required (e.g., user1:pass1,user2:pass2)" >&2
+if [[ -z "$USERS" && ! -s "$USERS_FILE" ]]; then
+  echo "USERS is required on first run (e.g., user1:pass1,user2:pass2)" >&2
   exit 1
 fi
 
@@ -83,36 +84,50 @@ MAIL_ROOT="/var/mail/${DOMAIN}"
 mkdir -p "$MAIL_ROOT"
 
 # Create users and Maildir
-USERS_FILE="/etc/lightmail/users"
-# Always recreate the users from the environment variable to avoid stateful errors.
-: > "$USERS_FILE"
+if [[ -s "$USERS_FILE" ]]; then
+  echo "Using existing users file: $USERS_FILE"
+  while IFS=':' read -r user hash; do
+    if [[ -z "$user" || -z "$hash" ]]; then
+      continue
+    fi
 
-IFS=',' read -ra USER_PAIRS <<< "$USERS"
-for pair in "${USER_PAIRS[@]}"; do
-  user="${pair%%:*}"
-  pass="${pair#*:}"
+    if ! id "$user" >/dev/null 2>&1; then
+      useradd -m -d "$MAIL_ROOT/$user" -s /usr/sbin/nologin "$user"
+    fi
 
-  if [[ -z "$user" || -z "$pass" || "$user" == "$pass" ]]; then
-    echo "Invalid user entry: $pair" >&2
-    exit 1
-  fi
+    echo "$user:$hash" | chpasswd -e
 
-  if ! id "$user" >/dev/null 2>&1; then
-    useradd -m -d "$MAIL_ROOT/$user" -s /usr/sbin/nologin "$user"
-  fi
+    maildir="$MAIL_ROOT/$user/Maildir"
+    mkdir -p "$maildir/cur" "$maildir/new" "$maildir/tmp"
+    chown -R "$user:$user" "$MAIL_ROOT/$user"
+  done < "$USERS_FILE"
+else
+  : > "$USERS_FILE"
+  IFS=',' read -ra USER_PAIRS <<< "$USERS"
+  for pair in "${USER_PAIRS[@]}"; do
+    user="${pair%%:*}"
+    pass="${pair#*:}"
 
-  echo "$user:$pass" | chpasswd
+    if [[ -z "$user" || -z "$pass" || "$user" == "$pass" ]]; then
+      echo "Invalid user entry: $pair" >&2
+      exit 1
+    fi
 
-  maildir="$MAIL_ROOT/$user/Maildir"
-  mkdir -p "$maildir/cur" "$maildir/new" "$maildir/tmp"
-  chown -R "$user:$user" "$MAIL_ROOT/$user"
+    if ! id "$user" >/dev/null 2>&1; then
+      useradd -m -d "$MAIL_ROOT/$user" -s /usr/sbin/nologin "$user"
+    fi
 
-# Store hashed password for persistent user reuse
-hash=$(openssl passwd -6 "$pass")
+    echo "$user:$pass" | chpasswd
 
-  printf "%s:%s\n" "$user" "$hash" >> "$USERS_FILE"
+    maildir="$MAIL_ROOT/$user/Maildir"
+    mkdir -p "$maildir/cur" "$maildir/new" "$maildir/tmp"
+    chown -R "$user:$user" "$MAIL_ROOT/$user"
 
-done
+    # Store hashed password for persistent user reuse.
+    hash=$(openssl passwd -6 "$pass")
+    printf "%s:%s\n" "$user" "$hash" >> "$USERS_FILE"
+  done
+fi
 
 chmod 600 "$USERS_FILE"
 
