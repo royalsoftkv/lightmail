@@ -31,7 +31,7 @@ if [[ -f "${CONFIG_FILE}" ]]; then
 fi
 
 DOMAIN="${DOMAIN:-${config_domain:-$DEFAULT_DOMAIN}}"
-HOSTNAME="${HOSTNAME:-mail.${DOMAIN}}"
+MAIL_HOSTNAME="${MAIL_HOSTNAME:-mail.${DOMAIN}}"
 # USERS is only used on first run if /etc/lightmail/users does not already exist.
 USERS="${USERS:-${config_users:-$DEFAULT_USERS}}"
 
@@ -49,7 +49,7 @@ docker run -d \
   -v "${DATA_ROOT}/config:/etc/lightmail" \
   -v "${DATA_ROOT}/certs:/etc/ssl/mail" \
   -e DOMAIN="${DOMAIN}" \
-  -e HOSTNAME="${HOSTNAME}" \
+  -e HOSTNAME="${MAIL_HOSTNAME}" \
   -e USERS="${USERS}" \
   -e ENABLE_IMAP=1 \
   -e ENABLE_ROUNDCUBE=1 \

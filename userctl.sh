@@ -35,7 +35,7 @@ case "$cmd" in
       if [[ -z \"\$domain\" ]]; then echo 'Cannot determine domain' >&2; exit 1; fi
       mail_root=\"/var/mail/\$domain\";
       users_file=\"/etc/lightmail/users\";
-      hash=\"\$(openssl passwd -6 \"$pass\")\";
+      hash=\"\$(doveadm pw -s SHA512-CRYPT -p \"$pass\")\";
       if ! id \"$user\" >/dev/null 2>&1; then
         useradd -m -d \"\$mail_root/$user\" -s /usr/sbin/nologin \"$user\";
       fi
@@ -48,6 +48,8 @@ case "$cmd" in
       else
         echo \"$user:\$hash\" >> \"\$users_file\";
       fi
+      chown root:dovecot \"\$users_file\" || true;
+      chmod 640 \"\$users_file\";
     "
     ;;
   disable)
@@ -60,6 +62,8 @@ case "$cmd" in
       fi
       if [[ -f \"\$users_file\" ]]; then
         sed -i \"/^$user:/d\" \"\$users_file\";
+        chown root:dovecot \"\$users_file\" || true;
+        chmod 640 \"\$users_file\";
       fi
     "
     ;;

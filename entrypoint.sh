@@ -86,21 +86,33 @@ mkdir -p "$MAIL_ROOT"
 # Create users and Maildir
 if [[ -s "$USERS_FILE" ]]; then
   echo "Using existing users file: $USERS_FILE"
+  normalized_users="$(mktemp)"
   while IFS=':' read -r user hash; do
     if [[ -z "$user" || -z "$hash" ]]; then
       continue
+    fi
+
+    if [[ "$hash" != \{* ]]; then
+      dovecot_hash="{SHA512-CRYPT}${hash}"
+      system_hash="$hash"
+    else
+      dovecot_hash="$hash"
+      system_hash="${hash#\{SHA512-CRYPT\}}"
+      system_hash="${system_hash#\{CRYPT\}}"
     fi
 
     if ! id "$user" >/dev/null 2>&1; then
       useradd -m -d "$MAIL_ROOT/$user" -s /usr/sbin/nologin "$user"
     fi
 
-    echo "$user:$hash" | chpasswd -e
+    echo "$user:$system_hash" | chpasswd -e
 
     maildir="$MAIL_ROOT/$user/Maildir"
     mkdir -p "$maildir/cur" "$maildir/new" "$maildir/tmp"
     chown -R "$user:$user" "$MAIL_ROOT/$user"
+    printf "%s:%s\n" "$user" "$dovecot_hash" >> "$normalized_users"
   done < "$USERS_FILE"
+  mv "$normalized_users" "$USERS_FILE"
 else
   : > "$USERS_FILE"
   IFS=',' read -ra USER_PAIRS <<< "$USERS"
@@ -124,12 +136,15 @@ else
     chown -R "$user:$user" "$MAIL_ROOT/$user"
 
     # Store hashed password for persistent user reuse.
-    hash=$(openssl passwd -6 "$pass")
+    hash=$(doveadm pw -s SHA512-CRYPT -p "$pass")
+    system_hash="${hash#\{SHA512-CRYPT\}}"
     printf "%s:%s\n" "$user" "$hash" >> "$USERS_FILE"
+    echo "$user:$system_hash" | chpasswd -e
   done
 fi
 
-chmod 600 "$USERS_FILE"
+chown root:dovecot "$USERS_FILE" || chown root:root "$USERS_FILE"
+chmod 640 "$USERS_FILE"
 
 # Ensure catchall user exists
 if ! id "$CATCHALL_USER" >/dev/null 2>&1; then
@@ -313,17 +328,33 @@ postfix start
 
 # Optional IMAP (Dovecot)
 if [[ "$ENABLE_IMAP" == "1" ]]; then
+  cat > /etc/dovecot/conf.d/auth-passwdfile.conf.ext <<'EOF_DOV_PASSDB'
+# Authentication for Lightmail passwd-file users.
+passdb {
+  driver = passwd-file
+  args = username_format=%Ln /etc/lightmail/users
+}
+EOF_DOV_PASSDB
+
+  cat > /etc/dovecot/conf.d/auth-system.conf.ext <<'EOF_DOV_USERDB'
+# System users for Lightmail mailbox ownership.
+userdb {
+  driver = passwd
+  args = username_format=%Ln
+}
+EOF_DOV_USERDB
+
+  sed -i 's/^#!include auth-passwdfile\.conf\.ext/!include auth-passwdfile.conf.ext/' /etc/dovecot/conf.d/10-auth.conf
+
   cat > /etc/dovecot/conf.d/99-lightmail.conf <<EOF_DOV
 protocols = imap
 listen = *
 ssl = required
-ssl_server_cert_file = /etc/ssl/mail/fullchain.pem
-ssl_server_key_file = /etc/ssl/mail/privkey.pem
-mail_driver = maildir
-mail_path = /var/mail/${DOMAIN}/%{user | username}/Maildir
-mail_inbox_path = /var/mail/${DOMAIN}/%{user | username}/Maildir
+ssl_cert = </etc/ssl/mail/fullchain.pem
+ssl_key = </etc/ssl/mail/privkey.pem
+mail_location = maildir:/var/mail/${DOMAIN}/%Ln/Maildir
 auth_mechanisms = plain login
-auth_username_format = %{user | username}
+auth_username_format = %Ln
 EOF_DOV
 
   dovecot -F >/var/log/dovecot.log 2>&1 &
@@ -390,9 +421,8 @@ if [[ "$ENABLE_ROUNDCUBE" == "1" ]]; then
 
   mkdir -p "${rc_data}/tmp" "${rc_data}/logs"
 
-  if [[ ! -f "$rc_config" ]]; then
-    des_key="$(openssl rand -hex 12)"
-    cat > "$rc_config" <<EOF
+  des_key="$(openssl rand -hex 12)"
+  cat > "$rc_config" <<EOF
 <?php
 \$config = [];
 \$config['db_dsnw'] = 'sqlite:////var/mail/roundcube/roundcube.sqlite';
@@ -414,18 +444,14 @@ if [[ "$ENABLE_ROUNDCUBE" == "1" ]]; then
 \$config['smtp_timeout'] = 5;
 \$config['des_key'] = '${des_key}';
 \$config['enable_installer'] = false;
-EOF
-
-    if [[ "$ROUNDCUBE_ALLOW_SELF_SIGNED" == "1" ]]; then
-    cat >> "$rc_config" <<'EOF'
-$config['imap_conn_options'] = [
+\$config['imap_conn_options'] = [
   'ssl' => [
     'verify_peer' => false,
     'verify_peer_name' => false,
     'allow_self_signed' => true,
   ],
 ];
-$config['smtp_conn_options'] = [
+\$config['smtp_conn_options'] = [
   'ssl' => [
     'verify_peer' => false,
     'verify_peer_name' => false,
@@ -433,26 +459,7 @@ $config['smtp_conn_options'] = [
   ],
 ];
 EOF
-    fi
-  fi
-
-  if ! grep -q "LIGHTMAIL_ROUNDCUBE_OVERRIDE" "$rc_config"; then
-    cat >> "$rc_config" <<EOF_RC_OVERRIDE
-// LIGHTMAIL_ROUNDCUBE_OVERRIDE
-\$config['default_host'] = 'ssl://127.0.0.1';
-\$config['default_port'] = 993;
-\$config['username_domain'] = '${DOMAIN}';
-\$config['temp_dir'] = '/var/mail/roundcube/tmp';
-\$config['log_dir'] = '/var/mail/roundcube/logs';
-\$config['log_driver'] = 'file';
-\$config['log_logins'] = true;
-\$config['log_session'] = true;
-\$config['debug_level'] = 1;
-\$config['smtp_log'] = true;
-\$config['imap_timeout'] = 5;
-\$config['smtp_timeout'] = 5;
-EOF_RC_OVERRIDE
-  fi
+  chmod 640 "$rc_config"
 
   ln -sf "$rc_config" "$rc_root/config/config.inc.php"
 
@@ -473,7 +480,8 @@ if [[ "$ENABLE_HTTPS_PROXY" == "1" ]]; then
 }
 https://${HTTPS_HOST}:${HTTPS_PORT} {
   tls /etc/ssl/mail/fullchain.pem /etc/ssl/mail/privkey.pem
-  
+
+  redir /roundcube* / 302
   reverse_proxy 127.0.0.1:${ROUNDCUBE_PORT}
 }
 EOF
