@@ -176,7 +176,7 @@ postconf -e "virtual_alias_maps=hash:/etc/postfix/virtual"
 postconf -e "inet_interfaces=all"
 postconf -e "mynetworks=127.0.0.0/8 [::1]/128"
 postconf -e "home_mailbox=Maildir/"
-postconf -e "smtpd_sasl_auth_enable=yes"
+postconf -e "smtpd_sasl_auth_enable=no"
 postconf -e "smtpd_sasl_type=cyrus"
 postconf -e "smtpd_sasl_path=smtpd"
 postconf -e "smtpd_sasl_security_options=noanonymous"
@@ -185,6 +185,7 @@ postconf -e "smtpd_recipient_restrictions=permit_sasl_authenticated,permit_mynet
 postconf -e "smtpd_tls_cert_file=/etc/ssl/mail/fullchain.pem"
 postconf -e "smtpd_tls_key_file=/etc/ssl/mail/privkey.pem"
 postconf -e "smtpd_tls_security_level=may"
+postconf -e "smtpd_tls_auth_only=yes"
 postconf -e "smtp_tls_security_level=may"
 
 # Catch-all for unknown local users only
@@ -289,6 +290,7 @@ if ! grep -q '^submission ' /etc/postfix/master.cf; then
 submission inet n - n - - smtpd
   -o syslog_name=postfix/submission
   -o smtpd_tls_security_level=encrypt
+  -o smtpd_tls_auth_only=yes
   -o smtpd_sasl_auth_enable=yes
   -o smtpd_recipient_restrictions=permit_sasl_authenticated,reject
   -o milter_macro_daemon_name=ORIGINATING
@@ -301,6 +303,7 @@ if ! grep -q '^smtps ' /etc/postfix/master.cf; then
 smtps inet n - n - - smtpd
   -o syslog_name=postfix/smtps
   -o smtpd_tls_wrappermode=yes
+  -o smtpd_tls_auth_only=yes
   -o smtpd_sasl_auth_enable=yes
   -o smtpd_recipient_restrictions=permit_sasl_authenticated,reject
   -o milter_macro_daemon_name=ORIGINATING
@@ -328,37 +331,41 @@ postfix start
 
 # Optional IMAP (Dovecot)
 if [[ "$ENABLE_IMAP" == "1" ]]; then
-  cat > /etc/dovecot/conf.d/auth-passwdfile.conf.ext <<'EOF_DOV_PASSDB'
-# Authentication for Lightmail passwd-file users.
-passdb {
-  driver = passwd-file
-  args = username_format=%Ln /etc/lightmail/users
+  cat > /etc/dovecot/conf.d/auth-lightmail.conf.ext <<'EOF_DOV_AUTH'
+# Authentication for Lightmail users.
+passdb passwd-file {
+  auth_username_format = %{user | username}
+  passwd_file_path = /etc/lightmail/users
 }
-EOF_DOV_PASSDB
-
-  cat > /etc/dovecot/conf.d/auth-system.conf.ext <<'EOF_DOV_USERDB'
-# System users for Lightmail mailbox ownership.
-userdb {
-  driver = passwd
-  args = username_format=%Ln
+userdb passwd-file {
+  auth_username_format = %{user | username}
+  passwd_file_path = /etc/passwd
 }
-EOF_DOV_USERDB
+EOF_DOV_AUTH
 
-  sed -i 's/^#!include auth-passwdfile\.conf\.ext/!include auth-passwdfile.conf.ext/' /etc/dovecot/conf.d/10-auth.conf
+  cat > /etc/dovecot/conf.d/10-auth.conf <<'EOF_DOV_10AUTH'
+auth_mechanisms = plain login
+!include auth-lightmail.conf.ext
+EOF_DOV_10AUTH
 
   cat > /etc/dovecot/conf.d/99-lightmail.conf <<EOF_DOV
 protocols = imap
 listen = *
 ssl = required
-ssl_cert = </etc/ssl/mail/fullchain.pem
-ssl_key = </etc/ssl/mail/privkey.pem
-mail_location = maildir:/var/mail/${DOMAIN}/%Ln/Maildir
-auth_mechanisms = plain login
-auth_username_format = %Ln
+ssl_server {
+  cert_file = /etc/ssl/mail/fullchain.pem
+  key_file = /etc/ssl/mail/privkey.pem
+}
+mail_driver = maildir
+mail_home = /var/mail/${DOMAIN}/%{user | username}
+mail_inbox_path = ~/Maildir
+mail_path = ~/Maildir
+mail_privileged_group = mail
 EOF_DOV
 
   dovecot -F >/var/log/dovecot.log 2>&1 &
 fi
+
 
 # Optional Roundcube (requires IMAP)
 if [[ "$ENABLE_ROUNDCUBE" == "1" ]]; then
