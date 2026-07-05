@@ -26,6 +26,7 @@ error() {
 }
 
 # --- Script ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # 1. Check Prerequisites
 info "Checking prerequisites..."
@@ -40,6 +41,8 @@ info "Prerequisites met."
 # 2. Gather User Input
 mkdir -p "$DATA_ROOT"
 CONFIG_FILE="${DATA_ROOT}/install.conf"
+CLOUDFLARE_TOKEN_FILE="${DATA_ROOT}/certs/cloudflare.ini"
+DATA_ROOT_ABS="$(cd "$DATA_ROOT" && pwd)"
 
 # Load existing config or prompt for new
 if [[ -f "$CONFIG_FILE" ]]; then
@@ -83,6 +86,14 @@ fi
 HOSTNAME="mail.${MAIN_DOMAIN}"
 SERVER_IP=$(curl -s4 ifconfig.me/ip || curl -s4 icanhazip.com || echo "")
 
+CF_API_TOKEN="${CF_API_TOKEN:-${CLOUDFLARE_API_TOKEN:-}}"
+CF_DNS_PLUGIN_IMAGE="certbot/dns-cloudflare"
+CERTBOT_IMAGE="certbot/certbot"
+
+if [[ -z "${CF_API_TOKEN}" ]]; then
+  read -rp "Enter a Cloudflare API token for DNS-01 certificate issuance (leave blank to use port 80 standalone): " CF_API_TOKEN
+fi
+
 if [[ -n "$SERVER_IP" ]]; then
     info "Detected server IP: ${YELLOW}${SERVER_IP}${NC}"
     read -rp "Is this correct? [Y/n]: " response
@@ -105,20 +116,46 @@ if [[ -f "$CERT_DEST_FULLCHAIN" && -f "$CERT_DEST_PRIVKEY" ]]; then
   info "Existing certificates found at ${DATA_ROOT}/certs. Skipping Certbot run."
 else
   info "Obtaining certificate for ${HOSTNAME} using Certbot..."
-  if lsof -i:80 &>/dev/null; then
-    error "Port 80 is already in use. Please stop the service on that port before running."
-  fi
 
-  docker run --rm \
-    -p 80:80 \
-    -v "$(pwd)/${DATA_ROOT}/certs:/etc/letsencrypt" \
-    certbot/certbot certonly \
-    --standalone \
-    -d "$HOSTNAME" \
-    --email "$ADMIN_EMAIL" \
-    --agree-tos \
-    --no-eff-email \
-    --key-type ecdsa
+  mkdir -p "${DATA_ROOT}/certs"
+
+  if [[ -n "${CF_API_TOKEN}" ]]; then
+    info "Using Cloudflare DNS-01 validation."
+    cat > "$CLOUDFLARE_TOKEN_FILE" <<EOF
+dns_cloudflare_api_token = ${CF_API_TOKEN}
+EOF
+    chmod 600 "$CLOUDFLARE_TOKEN_FILE"
+
+    docker run --rm \
+      -v "$(pwd)/${DATA_ROOT}/certs:/etc/letsencrypt" \
+      "${CF_DNS_PLUGIN_IMAGE}" certonly \
+      --dns-cloudflare \
+      --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
+      --dns-cloudflare-propagation-seconds 30 \
+      -d "$HOSTNAME" \
+      --email "$ADMIN_EMAIL" \
+      --agree-tos \
+      --no-eff-email \
+      --non-interactive \
+      --key-type ecdsa
+  else
+    info "Using standalone HTTP-01 validation on port 80."
+    if lsof -i:80 &>/dev/null; then
+      error "Port 80 is already in use. Please stop the service on that port before running."
+    fi
+
+    docker run --rm \
+      -p 80:80 \
+      -v "$(pwd)/${DATA_ROOT}/certs:/etc/letsencrypt" \
+      "${CERTBOT_IMAGE}" certonly \
+      --standalone \
+      -d "$HOSTNAME" \
+      --email "$ADMIN_EMAIL" \
+      --agree-tos \
+      --no-eff-email \
+      --non-interactive \
+      --key-type ecdsa
+  fi
 
   CERT_LIVE_DIR="${DATA_ROOT}/certs/live/${HOSTNAME}"
   if [[ ! -f "${CERT_LIVE_DIR}/fullchain.pem" || ! -f "${CERT_LIVE_DIR}/privkey.pem" ]]; then
@@ -164,6 +201,18 @@ docker run -d \
   -e ENABLE_ROUNDCUBE=1 \
   -e ENABLE_HTTPS_PROXY=1 \
   lightmail:latest
+
+if [[ -f "$CLOUDFLARE_TOKEN_FILE" ]]; then
+  info "Installing automatic certificate renewal cron job..."
+  CRON_FILE="/etc/cron.d/lightmail-renew"
+  cat > "$CRON_FILE" <<EOF
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+0 3 1 * * root "${SCRIPT_DIR}/renew-cert.sh" "${HOSTNAME}" "${DATA_ROOT_ABS}/certs" "${CONTAINER_NAME}" >> /var/log/lightmail-renew.log 2>&1
+EOF
+  chmod 644 "$CRON_FILE"
+  touch /var/log/lightmail-renew.log
+fi
 
 info "Waiting for container to initialize..."
 sleep 10

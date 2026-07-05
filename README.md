@@ -30,7 +30,8 @@ sudo ./install.sh
 
 The script will:
 - Prompt for your domain, admin email, and user accounts
-- Obtain a Let's Encrypt certificate via Certbot (port 80 must be free)
+- Obtain a Let's Encrypt certificate via Certbot
+- Use Cloudflare DNS-01 automatically if you provide a Cloudflare API token
 - Start the mail container with IMAP, Roundcube, and HTTPS proxy enabled
 - Save config to `./lightmail-data/install.conf` for future runs
 - Print the DNS records you need to add
@@ -52,7 +53,7 @@ Follow the output from `install.sh`, or see [External Setup](#external-setup-req
 ```
 0 3 1 * * /path/to/lightmail/renew-cert.sh mail.example.com /path/to/lightmail-data/certs lightmail >> /var/log/lightmail-renew.log 2>&1
 ```
-Port 80 must be free when the cron job runs. Certbot renews only when the cert is close to expiry.
+If you use Cloudflare DNS-01, the renewal helper reuses `lightmail-data/certs/cloudflare.ini` and does not need port 80. Otherwise, port 80 must be free when the cron job runs. Certbot renews only when the cert is close to expiry.
 
 ### Access after install
 - **Webmail:** `https://mail.<domain>:8443`
@@ -147,7 +148,7 @@ docker exec lightmail cat /etc/lightmail/dkim/<domain>/mail.txt
 - By default, ACME is only used when no certs exist. To enable periodic renewal inside the container, set `ENABLE_ACME_RENEW=1` (requires port 80 to be reachable).
 
 ## Manual Renewal (No Port 80 Normally)
-Use the helper script to renew certificates when needed. It briefly maps port 80 and restarts the container.
+Use the helper script to renew certificates when needed. It uses Cloudflare DNS-01 automatically if `cloudflare.ini` exists in the cert directory; otherwise it briefly maps port 80 and restarts the container.
 
 ```
 ./renew-cert.sh mail.example.com ./lightmail-data/certs lightmail

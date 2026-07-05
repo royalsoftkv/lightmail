@@ -60,7 +60,7 @@ Place your certs here:
 - `/root/lightmail-data/certs/fullchain.pem`
 - `/root/lightmail-data/certs/privkey.pem`
 
-If you want ACME to issue certs inside the container, set `ENABLE_ACME=1` and map port 80 temporarily. You can also use `renew-cert.sh` to renew certs outside the main container (same Certbot approach as install.sh).
+If you want ACME to issue certs inside the container, set `ENABLE_ACME=1` and map port 80 temporarily. You can also use `renew-cert.sh` to renew certs outside the main container; it will use Cloudflare DNS-01 automatically when `lightmail-data/certs/cloudflare.ini` exists.
 
 ### 4) Run container (example)
 ```
